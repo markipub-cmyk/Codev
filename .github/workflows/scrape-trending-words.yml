@@ -1,0 +1,87 @@
+name: Scrape — Trending Words (q84sale)
+
+on:
+  schedule:
+    #  02:05 UTC daily  (05:05 Kuwait time — 5 min after trending categories)
+    - cron: '5 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  # ── Job 1: work out which geo Account 1 should use today ─────────────────
+  calculate-geo:
+    runs-on: ubuntu-22.04
+    outputs:
+      geo: ${{ steps.geo.outputs.geo }}
+    steps:
+      - name: Calculate geo for Account 1 today
+        id: geo
+        run: |
+          DOW=$(date +%w)   # 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+          if [ "$DOW" = "0" ]; then
+            GEO="eg"          # Sunday
+          elif [ $(( DOW % 2 )) = "1" ]; then
+            GEO="kw"          # Mon / Wed / Fri
+          else
+            GEO="sa"          # Tue / Thu / Sat
+          fi
+          echo "geo=$GEO" >> $GITHUB_OUTPUT
+          echo "Account 1 today → __cr.$GEO  (DOW=$DOW)"
+
+  # ── Job 2: scrape and upload ──────────────────────────────────────────────
+  scrape-words:
+    needs: calculate-geo
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    env:
+      # DataImpulse proxy — Account 1 with today's geo suffix
+      DATAIMPULSE_USER: ${{ secrets.DATAIMPULSE_USER_1 }}__cr.${{ needs.calculate-geo.outputs.geo }}
+      DATAIMPULSE_PASS: ${{ secrets.DATAIMPULSE_PASS_1 }}
+      PROXY_HOST: gw.dataimpulse.com
+      PROXY_PORT: "823"
+      # Cloudflare R2
+      CF_R2_ACCESS_KEY_ID:     ${{ secrets.CF_R2_ACCESS_KEY_ID }}
+      CF_R2_SECRET_ACCESS_KEY: ${{ secrets.CF_R2_SECRET_ACCESS_KEY }}
+      CF_R2_ENDPOINT_URL:      ${{ secrets.CF_R2_ENDPOINT_URL }}
+      CF_R2_BUCKET_NAME:       ${{ secrets.CF_R2_BUCKET_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: requirements_trending.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements_trending.txt
+
+      - name: Random start delay (stealth — 0 to 15 min)
+        run: |
+          DELAY=$((RANDOM % 900))
+          echo "Waiting ${DELAY}s before scraping..."
+          sleep $DELAY
+
+      - name: Show active proxy geo
+        run: |
+          echo "Proxy user : ${{ secrets.DATAIMPULSE_USER_1 }}__cr.${{ needs.calculate-geo.outputs.geo }}"
+          echo "Proxy host : gw.dataimpulse.com:823"
+
+      - name: Run trending words scraper
+        run: python scrape_trending_words.py
+
+      - name: Print upload summary
+        run: |
+          DATE=$(date -u +"%Y-%m-%d")
+          YEAR=$(date -u +"%Y")
+          MONTH=$(date -u +"%m")
+          DAY=$(date -u +"%d")
+          echo "================================================"
+          echo "  Scrape date : $DATE"
+          echo "  Geo used    : __cr.${{ needs.calculate-geo.outputs.geo }}"
+          echo "  R2 path     : 4sale-data/trending_words/year=$YEAR/month=$MONTH/day=$DAY/excel-files/"
+          echo "  Bucket      : ${{ secrets.CF_R2_BUCKET_NAME }}"
+          echo "================================================"
